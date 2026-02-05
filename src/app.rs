@@ -19,6 +19,12 @@ struct SelectableItem {
     is_default: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Characters,
+    Accounts,
+}
+
 pub struct PackPreferencesApp {
     config: Config,
     detected_prefixes: Vec<DetectedPrefix>,
@@ -33,14 +39,11 @@ pub struct PackPreferencesApp {
     show_backup_manager: bool,
     backups: Vec<PathBuf>,
     pending_confirmation: Option<PendingAction>,
-    sync_mode: SyncMode,
+    active_tab: Tab,
+    show_log_window: bool,
+    log_paste_url: Option<String>,
+    sync_complete_message: Option<String>,
     about: AboutScreen,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum SyncMode {
-    Characters, // Sync core_char_* files
-    Users,      // Sync core_user_* files (accounts)
 }
 
 #[derive(Clone)]
@@ -79,7 +82,10 @@ impl PackPreferencesApp {
             show_backup_manager: false,
             backups: Vec::new(),
             pending_confirmation: None,
-            sync_mode: SyncMode::Users,
+            active_tab: Tab::Accounts,
+            show_log_window: false,
+            log_paste_url: None,
+            sync_complete_message: None,
             about: AboutScreen::new(),
         };
 
@@ -171,11 +177,11 @@ impl PackPreferencesApp {
                 self.target_selections.clear();
                 self.resolve_names();
 
-                // Auto-select sync mode based on available files
+                // Auto-select tab based on available files
                 if char_count <= 1 && user_count > 1 {
-                    self.sync_mode = SyncMode::Users;
+                    self.active_tab = Tab::Accounts;
                 } else if char_count > 1 {
-                    self.sync_mode = SyncMode::Characters;
+                    self.active_tab = Tab::Characters;
                 }
             }
             Err(e) => {
@@ -234,9 +240,9 @@ impl PackPreferencesApp {
     }
 
     fn get_selectable_items(&self) -> Vec<SelectableItem> {
-        let target_type = match self.sync_mode {
-            SyncMode::Characters => FileType::Character,
-            SyncMode::Users => FileType::User,
+        let target_type = match self.active_tab {
+            Tab::Characters => FileType::Character,
+            Tab::Accounts => FileType::User,
         };
 
         let mut seen = HashSet::new();
@@ -367,8 +373,9 @@ impl PackPreferencesApp {
                 } else {
                     "Synced"
                 };
-                self.status_messages
-                    .push(format!("{} {} files", action, total_synced));
+                let message = format!("{} {} files", action, total_synced);
+                self.status_messages.push(message.clone());
+                self.sync_complete_message = Some(message);
             }
             Err(e) => {
                 self.status_messages.push(format!("Sync error: {}", e));
@@ -406,12 +413,75 @@ impl PackPreferencesApp {
             }
         }
     }
+
+    fn upload_log_to_paste(&mut self, ctx: &egui::Context) {
+        let log_text = self.status_messages.join("\n");
+        if log_text.is_empty() {
+            return;
+        }
+
+        let client = reqwest::blocking::Client::new();
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("text", log_text)
+            .text("lang", "text");
+
+        match client
+            .post("https://pst.plb.so/paste/new")
+            .multipart(form)
+            .send()
+        {
+            Ok(response) => {
+                let url = response.url().to_string();
+                ctx.copy_text(url.clone());
+                self.log_paste_url = Some(url.clone());
+                self.status_messages
+                    .push(format!("Log uploaded (copied to clipboard): {}", url));
+            }
+            Err(e) => {
+                self.status_messages.push(format!("Upload failed: {}", e));
+            }
+        }
+    }
 }
 
 impl eframe::App for PackPreferencesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Show about screen if open
         self.about.show(ctx);
+
+        // Show log window if open
+        let mut show_log = self.show_log_window;
+        if show_log {
+            egui::Window::new("Log")
+                .open(&mut show_log)
+                .default_size([500.0, 300.0])
+                .show(ctx, |ui| {
+                    // Header with actions
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy Log").clicked() {
+                            self.upload_log_to_paste(ctx);
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.status_messages.clear();
+                            self.log_paste_url = None;
+                        }
+                        if let Some(ref url) = self.log_paste_url {
+                            ui.label(format!("Paste: {}", url));
+                        }
+                    });
+                    ui.separator();
+
+                    // Log content
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for msg in &self.status_messages {
+                                ui.label(msg);
+                            }
+                        });
+                });
+            self.show_log_window = show_log;
+        }
 
         // Handle pending confirmations
         if let Some(action) = self.pending_confirmation.clone() {
@@ -453,13 +523,31 @@ impl eframe::App for PackPreferencesApp {
                 });
         }
 
+        // Show sync complete dialog
+        if let Some(message) = self.sync_complete_message.clone() {
+            egui::Window::new("Done")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(&message);
+                    ui.add_space(10.0);
+                    if ui.button("OK").clicked() {
+                        self.sync_complete_message = None;
+                    }
+                });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            // App title with about button
+            // App title with Log and About buttons
             ui.horizontal(|ui| {
                 theme::styled_title(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("About").clicked() {
                         self.about.open = true;
+                    }
+                    if ui.button("Log").clicked() {
+                        self.show_log_window = !self.show_log_window;
                     }
                 });
             });
@@ -475,7 +563,7 @@ impl eframe::App for PackPreferencesApp {
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Not selected".to_string());
-                ui.add(egui::TextEdit::singleline(&mut prefix_text.as_str()).desired_width(300.0));
+                ui.add(egui::TextEdit::singleline(&mut prefix_text.as_str()).desired_width(400.0));
 
                 if ui.button("Browse").clicked() {
                     self.browse_for_prefix();
@@ -487,39 +575,53 @@ impl eframe::App for PackPreferencesApp {
 
             ui.separator();
 
-            // Sync mode selection
-            ui.horizontal(|ui| {
-                ui.label("Sync Mode:");
-                let char_count = self
-                    .character_files
-                    .iter()
-                    .filter(|f| f.file_type == FileType::Character)
-                    .count();
-                let user_count = self
-                    .character_files
-                    .iter()
-                    .filter(|f| f.file_type == FileType::User)
-                    .count();
+            // Tab selection styled as buttons
+            let char_count = self
+                .character_files
+                .iter()
+                .filter(|f| f.file_type == FileType::Character)
+                .count();
+            let user_count = self
+                .character_files
+                .iter()
+                .filter(|f| f.file_type == FileType::User)
+                .count();
 
-                if ui
-                    .radio_value(
-                        &mut self.sync_mode,
-                        SyncMode::Characters,
-                        format!("Characters ({})", char_count),
-                    )
-                    .changed()
-                {
+            ui.horizontal(|ui| {
+                let char_selected = self.active_tab == Tab::Characters;
+                let acct_selected = self.active_tab == Tab::Accounts;
+
+                // Custom tab styling: selected = black text on teal background
+                let char_text = if char_selected {
+                    egui::RichText::new(format!("Characters ({})", char_count))
+                        .color(egui::Color32::BLACK)
+                } else {
+                    egui::RichText::new(format!("Characters ({})", char_count))
+                };
+                let char_button = if char_selected {
+                    egui::Button::new(char_text).fill(theme::colors::CYAN)
+                } else {
+                    egui::Button::new(char_text)
+                };
+                if ui.add(char_button).clicked() && !char_selected {
+                    self.active_tab = Tab::Characters;
                     self.source_selection = None;
                     self.target_selections.clear();
                 }
-                if ui
-                    .radio_value(
-                        &mut self.sync_mode,
-                        SyncMode::Users,
-                        format!("Accounts/Users ({})", user_count),
-                    )
-                    .changed()
-                {
+
+                let acct_text = if acct_selected {
+                    egui::RichText::new(format!("Accounts ({})", user_count))
+                        .color(egui::Color32::BLACK)
+                } else {
+                    egui::RichText::new(format!("Accounts ({})", user_count))
+                };
+                let acct_button = if acct_selected {
+                    egui::Button::new(acct_text).fill(theme::colors::CYAN)
+                } else {
+                    egui::Button::new(acct_text)
+                };
+                if ui.add(acct_button).clicked() && !acct_selected {
+                    self.active_tab = Tab::Accounts;
                     self.source_selection = None;
                     self.target_selections.clear();
                 }
@@ -528,72 +630,73 @@ impl eframe::App for PackPreferencesApp {
             ui.separator();
 
             let items = self.get_selectable_items();
-            let type_label = match self.sync_mode {
-                SyncMode::Characters => "Character",
-                SyncMode::Users => "Account",
+            let type_label = match self.active_tab {
+                Tab::Characters => "Character",
+                Tab::Accounts => "Account",
             };
 
-            // Source selection (exclude default files - can't copy FROM defaults)
-            ui.heading(format!("Source {} (copy FROM):", type_label));
-            egui::ScrollArea::vertical()
-                .id_salt("source_scroll")
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    let source_items: Vec<_> = items.iter().filter(|i| !i.is_default).collect();
-                    if source_items.is_empty() {
-                        ui.label(format!("No {} files found", type_label.to_lowercase()));
-                    }
-                    for item in source_items {
-                        let selected = self.source_selection == Some(item.file_idx);
-                        if ui
-                            .radio(selected, format!("{}  [{}]", item.display_name, item.id))
-                            .clicked()
-                        {
-                            self.source_selection = Some(item.file_idx);
-                            self.target_selections.remove(&item.file_idx);
+            // Source and Target side-by-side
+            ui.columns(2, |columns| {
+                // Left column: Source selection
+                columns[0].heading("Source (copy FROM):");
+                egui::ScrollArea::vertical()
+                    .id_salt("source_scroll")
+                    .max_height(180.0)
+                    .show(&mut columns[0], |ui| {
+                        let source_items: Vec<_> = items.iter().filter(|i| !i.is_default).collect();
+                        if source_items.is_empty() {
+                            ui.label(format!("No {} files found", type_label.to_lowercase()));
                         }
-                    }
-                });
-
-            ui.separator();
-
-            // Target selection
-            ui.heading(format!("Target {}s (copy TO):", type_label));
-            ui.horizontal(|ui| {
-                if ui.button("Select All").clicked() {
-                    self.select_all_targets();
-                }
-                if ui.button("Select None").clicked() {
-                    self.select_none_targets();
-                }
-            });
-
-            egui::ScrollArea::vertical()
-                .id_salt("target_scroll")
-                .max_height(150.0)
-                .show(ui, |ui| {
-                    for item in &items {
-                        // Can't select source as target
-                        if self.source_selection == Some(item.file_idx) {
-                            continue;
-                        }
-
-                        let label = if item.is_default {
-                            item.display_name.clone()
-                        } else {
-                            format!("{}  [{}]", item.display_name, item.id)
-                        };
-
-                        let mut selected = self.target_selections.contains(&item.file_idx);
-                        if ui.checkbox(&mut selected, label).changed() {
-                            if selected {
-                                self.target_selections.insert(item.file_idx);
-                            } else {
+                        for item in source_items {
+                            let selected = self.source_selection == Some(item.file_idx);
+                            if ui
+                                .radio(selected, format!("{}  [{}]", item.display_name, item.id))
+                                .clicked()
+                            {
+                                self.source_selection = Some(item.file_idx);
                                 self.target_selections.remove(&item.file_idx);
                             }
                         }
+                    });
+
+                // Right column: Target selection
+                columns[1].heading("Targets (copy TO):");
+                egui::ScrollArea::vertical()
+                    .id_salt("target_scroll")
+                    .max_height(150.0)
+                    .show(&mut columns[1], |ui| {
+                        for item in &items {
+                            // Can't select source as target
+                            if self.source_selection == Some(item.file_idx) {
+                                continue;
+                            }
+
+                            let label = if item.is_default {
+                                item.display_name.clone()
+                            } else {
+                                format!("{}  [{}]", item.display_name, item.id)
+                            };
+
+                            let mut selected = self.target_selections.contains(&item.file_idx);
+                            if ui.checkbox(&mut selected, label).changed() {
+                                if selected {
+                                    self.target_selections.insert(item.file_idx);
+                                } else {
+                                    self.target_selections.remove(&item.file_idx);
+                                }
+                            }
+                        }
+                    });
+
+                columns[1].horizontal(|ui| {
+                    if ui.button("Select All").clicked() {
+                        self.select_all_targets();
+                    }
+                    if ui.button("Select None").clicked() {
+                        self.select_none_targets();
                     }
                 });
+            });
 
             ui.separator();
 
@@ -625,7 +728,7 @@ impl eframe::App for PackPreferencesApp {
                 ui.heading("Backups:");
                 egui::ScrollArea::vertical()
                     .id_salt("backup_scroll")
-                    .max_height(100.0)
+                    .max_height(80.0)
                     .show(ui, |ui| {
                         if self.backups.is_empty() {
                             ui.label("No backups found");
@@ -646,20 +749,6 @@ impl eframe::App for PackPreferencesApp {
                         }
                     });
             }
-
-            ui.separator();
-
-            // Status area
-            ui.heading("Status:");
-            egui::ScrollArea::vertical()
-                .id_salt("status_scroll")
-                .max_height(100.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for msg in &self.status_messages {
-                        ui.label(msg);
-                    }
-                });
         });
     }
 
