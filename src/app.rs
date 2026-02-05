@@ -14,6 +14,7 @@ struct SelectableItem {
     file_idx: usize,
     id: u64,
     display_name: String,
+    is_default: bool,
 }
 
 pub struct PackPreferencesApp {
@@ -236,10 +237,17 @@ impl PackPreferencesApp {
         let mut result = Vec::new();
 
         for (idx, file) in self.character_files.iter().enumerate() {
-            if file.file_type == target_type && !seen.contains(&file.character_id) {
-                seen.insert(file.character_id);
+            if file.file_type == target_type
+                && !seen.contains(&(file.character_id, file.is_default))
+            {
+                seen.insert((file.character_id, file.is_default));
 
-                let display_name = if target_type == FileType::Character {
+                let display_name = if file.is_default {
+                    match target_type {
+                        FileType::Character => "Default (new characters)".to_string(),
+                        FileType::User => "Default (new accounts)".to_string(),
+                    }
+                } else if target_type == FileType::Character {
                     self.character_names
                         .get(&file.character_id)
                         .cloned()
@@ -252,6 +260,7 @@ impl PackPreferencesApp {
                     file_idx: idx,
                     id: file.character_id,
                     display_name,
+                    is_default: file.is_default,
                 });
             }
         }
@@ -502,16 +511,17 @@ impl eframe::App for PackPreferencesApp {
                 SyncMode::Users => "Account",
             };
 
-            // Source selection
+            // Source selection (exclude default files - can't copy FROM defaults)
             ui.heading(format!("Source {} (copy FROM):", type_label));
             egui::ScrollArea::vertical()
                 .id_salt("source_scroll")
                 .max_height(120.0)
                 .show(ui, |ui| {
-                    if items.is_empty() {
+                    let source_items: Vec<_> = items.iter().filter(|i| !i.is_default).collect();
+                    if source_items.is_empty() {
                         ui.label(format!("No {} files found", type_label.to_lowercase()));
                     }
-                    for item in &items {
+                    for item in source_items {
                         let selected = self.source_selection == Some(item.file_idx);
                         if ui
                             .radio(selected, format!("{}  [{}]", item.display_name, item.id))
@@ -546,14 +556,14 @@ impl eframe::App for PackPreferencesApp {
                             continue;
                         }
 
+                        let label = if item.is_default {
+                            item.display_name.clone()
+                        } else {
+                            format!("{}  [{}]", item.display_name, item.id)
+                        };
+
                         let mut selected = self.target_selections.contains(&item.file_idx);
-                        if ui
-                            .checkbox(
-                                &mut selected,
-                                format!("{}  [{}]", item.display_name, item.id),
-                            )
-                            .changed()
-                        {
+                        if ui.checkbox(&mut selected, label).changed() {
                             if selected {
                                 self.target_selections.insert(item.file_idx);
                             } else {
