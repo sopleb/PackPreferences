@@ -1,9 +1,11 @@
+mod about;
 mod app;
 mod config;
 mod discovery;
 mod esi;
 mod process;
 mod settings;
+mod theme;
 
 use anyhow::Result;
 use eframe::egui;

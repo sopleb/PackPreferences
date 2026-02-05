@@ -2,11 +2,13 @@ use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::about::AboutScreen;
 use crate::config::Config;
 use crate::discovery::{self, CharacterFile, FileType};
 use crate::esi;
 use crate::process::{self, DetectedPrefix};
 use crate::settings;
+use crate::theme;
 
 /// Represents a selectable item (either a character or user/account)
 #[derive(Clone)]
@@ -31,8 +33,8 @@ pub struct PackPreferencesApp {
     show_backup_manager: bool,
     backups: Vec<PathBuf>,
     pending_confirmation: Option<PendingAction>,
-    // New: sync mode
     sync_mode: SyncMode,
+    about: AboutScreen,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -50,6 +52,9 @@ enum PendingAction {
 impl PackPreferencesApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = Config::load().unwrap_or_default();
+
+        // Apply custom theme
+        theme::apply_pack_theme(&cc.egui_ctx);
 
         // Set initial window position from config
         if let Some(ctx) = cc.egui_ctx.clone().into() {
@@ -74,7 +79,8 @@ impl PackPreferencesApp {
             show_backup_manager: false,
             backups: Vec::new(),
             pending_confirmation: None,
-            sync_mode: SyncMode::Users, // Default to users since that's more common
+            sync_mode: SyncMode::Users,
+            about: AboutScreen::new(),
         };
 
         // Auto-detect on startup
@@ -404,6 +410,9 @@ impl PackPreferencesApp {
 
 impl eframe::App for PackPreferencesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Show about screen if open
+        self.about.show(ctx);
+
         // Handle pending confirmations
         if let Some(action) = self.pending_confirmation.clone() {
             egui::Window::new("Confirm")
@@ -445,6 +454,19 @@ impl eframe::App for PackPreferencesApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // App title with about button
+            ui.horizontal(|ui| {
+                theme::styled_title(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("About").clicked() {
+                        self.about.open = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
             // Prefix selection
             ui.horizontal(|ui| {
                 ui.label("Wine Prefix:");
