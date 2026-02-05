@@ -55,4 +55,4 @@ jobs:
             artifacts/pack-preferences-x86_64-unknown-linux-gnu/pack-preferences-linux-*
             artifacts/pack-preferences-aarch64-unknown-linux-gnu/pack-preferences-linux-*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}

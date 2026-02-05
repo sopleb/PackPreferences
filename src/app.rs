@@ -43,6 +43,9 @@ pub struct PackPreferencesApp {
     show_log_window: bool,
     log_paste_url: Option<String>,
     sync_complete_message: Option<String>,
+    update_available: Option<String>,
+    show_update_dialog: bool,
+    show_no_update_dialog: bool,
     about: AboutScreen,
 }
 
@@ -86,11 +89,17 @@ impl PackPreferencesApp {
             show_log_window: false,
             log_paste_url: None,
             sync_complete_message: None,
+            update_available: None,
+            show_update_dialog: false,
+            show_no_update_dialog: false,
             about: AboutScreen::new(),
         };
 
         // Auto-detect on startup
         app.scan_for_eve();
+
+        // Check for updates on startup
+        app.check_for_updates();
 
         app
     }
@@ -442,6 +451,57 @@ impl PackPreferencesApp {
             }
         }
     }
+
+    fn check_for_updates(&mut self) {
+        let current_version = env!("CARGO_PKG_VERSION");
+
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("PackPreferences")
+            .build();
+
+        let client = match client {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let response = client
+            .get("https://api.github.com/repos/sopleb/PackPreferences/releases/latest")
+            .send();
+
+        if let Ok(resp) = response {
+            if let Ok(json) = resp.json::<serde_json::Value>() {
+                if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                    // Strip 'v' prefix if present for comparison
+                    let latest = tag.trim_start_matches('v');
+                    if Self::version_newer(latest, current_version) {
+                        self.update_available = Some(tag.to_string());
+                        self.show_update_dialog = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn version_newer(latest: &str, current: &str) -> bool {
+        let parse = |v: &str| -> Vec<u32> {
+            v.split('.')
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        };
+
+        let latest_parts = parse(latest);
+        let current_parts = parse(current);
+
+        for (l, c) in latest_parts.iter().zip(current_parts.iter()) {
+            if l > c {
+                return true;
+            } else if l < c {
+                return false;
+            }
+        }
+
+        latest_parts.len() > current_parts.len()
+    }
 }
 
 impl eframe::App for PackPreferencesApp {
@@ -538,6 +598,49 @@ impl eframe::App for PackPreferencesApp {
                 });
         }
 
+        // Show update available dialog
+        if self.show_update_dialog {
+            if let Some(ref version) = self.update_available.clone() {
+                egui::Window::new("Update Available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!(
+                            "A new version ({}) is available!",
+                            version
+                        ));
+                        ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Download").clicked() {
+                                let _ = open::that("https://github.com/sopleb/PackPreferences/releases/latest");
+                                self.show_update_dialog = false;
+                            }
+                            if ui.button("Later").clicked() {
+                                self.show_update_dialog = false;
+                            }
+                        });
+                    });
+            }
+        }
+
+        // Show no update available dialog
+        if self.show_no_update_dialog {
+            egui::Window::new("Up to Date")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("You're running the latest version.");
+                    ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
+                    ui.add_space(10.0);
+                    if ui.button("OK").clicked() {
+                        self.show_no_update_dialog = false;
+                    }
+                });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // App title with Log and About buttons
             ui.horizontal(|ui| {
@@ -548,6 +651,20 @@ impl eframe::App for PackPreferencesApp {
                     }
                     if ui.button("Log").clicked() {
                         self.show_log_window = !self.show_log_window;
+                    }
+                    // Show update indicator or check button
+                    if self.update_available.is_some() {
+                        if ui
+                            .button(egui::RichText::new("Update Available").color(theme::colors::ELECTRIC_GREEN))
+                            .clicked()
+                        {
+                            self.show_update_dialog = true;
+                        }
+                    } else if ui.button("Check Updates").clicked() {
+                        self.check_for_updates();
+                        if self.update_available.is_none() {
+                            self.show_no_update_dialog = true;
+                        }
                     }
                 });
             });
