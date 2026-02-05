@@ -8,6 +8,14 @@ use crate::esi;
 use crate::process::{self, DetectedPrefix};
 use crate::settings;
 
+/// Represents a selectable item (either a character or user/account)
+#[derive(Clone)]
+struct SelectableItem {
+    file_idx: usize,
+    id: u64,
+    display_name: String,
+}
+
 pub struct PackPreferencesApp {
     config: Config,
     detected_prefixes: Vec<DetectedPrefix>,
@@ -22,6 +30,14 @@ pub struct PackPreferencesApp {
     show_backup_manager: bool,
     backups: Vec<PathBuf>,
     pending_confirmation: Option<PendingAction>,
+    // New: sync mode
+    sync_mode: SyncMode,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SyncMode {
+    Characters, // Sync core_char_* files
+    Users,      // Sync core_user_* files (accounts)
 }
 
 #[derive(Clone)]
@@ -57,6 +73,7 @@ impl PackPreferencesApp {
             show_backup_manager: false,
             backups: Vec::new(),
             pending_confirmation: None,
+            sync_mode: SyncMode::Users, // Default to users since that's more common
         };
 
         // Auto-detect on startup
@@ -130,12 +147,29 @@ impl PackPreferencesApp {
 
         match discovery::discover_character_files(settings_dir) {
             Ok(files) => {
-                self.status_messages
-                    .push(format!("Found {} character files", files.len()));
+                let char_count = files
+                    .iter()
+                    .filter(|f| f.file_type == FileType::Character)
+                    .count();
+                let user_count = files
+                    .iter()
+                    .filter(|f| f.file_type == FileType::User)
+                    .count();
+                self.status_messages.push(format!(
+                    "Found {} character files, {} user files",
+                    char_count, user_count
+                ));
                 self.character_files = files;
                 self.source_selection = None;
                 self.target_selections.clear();
                 self.resolve_names();
+
+                // Auto-select sync mode based on available files
+                if char_count <= 1 && user_count > 1 {
+                    self.sync_mode = SyncMode::Users;
+                } else if char_count > 1 {
+                    self.sync_mode = SyncMode::Characters;
+                }
             }
             Err(e) => {
                 self.status_messages
@@ -145,7 +179,7 @@ impl PackPreferencesApp {
     }
 
     fn resolve_names(&mut self) {
-        // Get unique character IDs from char files only
+        // Get unique character IDs from char files only (user IDs are not character IDs)
         let char_ids: Vec<u64> = self
             .character_files
             .iter()
@@ -171,8 +205,10 @@ impl PackPreferencesApp {
 
                 let resolved = self.character_names.len();
                 let total = char_ids.len();
-                self.status_messages
-                    .push(format!("Resolved {}/{} character names", resolved, total));
+                if total > 0 {
+                    self.status_messages
+                        .push(format!("Resolved {}/{} character names", resolved, total));
+                }
             }
             Err(e) => {
                 self.status_messages
@@ -190,10 +226,44 @@ impl PackPreferencesApp {
         }
     }
 
+    fn get_selectable_items(&self) -> Vec<SelectableItem> {
+        let target_type = match self.sync_mode {
+            SyncMode::Characters => FileType::Character,
+            SyncMode::Users => FileType::User,
+        };
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        for (idx, file) in self.character_files.iter().enumerate() {
+            if file.file_type == target_type && !seen.contains(&file.character_id) {
+                seen.insert(file.character_id);
+
+                let display_name = if target_type == FileType::Character {
+                    self.character_names
+                        .get(&file.character_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Character {}", file.character_id))
+                } else {
+                    format!("Account {}", file.character_id)
+                };
+
+                result.push(SelectableItem {
+                    file_idx: idx,
+                    id: file.character_id,
+                    display_name,
+                });
+            }
+        }
+
+        result
+    }
+
     fn select_all_targets(&mut self) {
-        for i in 0..self.character_files.len() {
-            if Some(i) != self.source_selection {
-                self.target_selections.insert(i);
+        let items = self.get_selectable_items();
+        for item in items {
+            if Some(item.file_idx) != self.source_selection {
+                self.target_selections.insert(item.file_idx);
             }
         }
     }
@@ -238,61 +308,57 @@ impl PackPreferencesApp {
             }
         }
 
-        // Get source character's files
-        let source_char_id = self.character_files[source_idx].character_id;
-        let source_files: Vec<&CharacterFile> = self
-            .character_files
-            .iter()
-            .filter(|f| f.character_id == source_char_id)
-            .collect();
+        // Get the source file
+        let source_file = &self.character_files[source_idx];
 
-        // Get target character IDs
-        let target_char_ids: HashSet<u64> = self
+        // Get target files (same file type as source)
+        let target_ids: HashSet<u64> = self
             .target_selections
             .iter()
             .map(|&i| self.character_files[i].character_id)
             .collect();
 
-        // Get target files
         let target_files: Vec<&CharacterFile> = self
             .character_files
             .iter()
-            .filter(|f| target_char_ids.contains(&f.character_id))
+            .filter(|f| {
+                f.file_type == source_file.file_type
+                    && target_ids.contains(&f.character_id)
+                    && f.character_id != source_file.character_id
+            })
             .collect();
 
-        // Sync each source file type
-        let mut total_synced = 0;
-        for source in &source_files {
-            match settings::sync_settings(source, &target_files, self.dry_run_mode) {
-                Ok(results) => {
-                    for result in results {
-                        if result.success {
-                            total_synced += 1;
-                            let target_name = result
-                                .target_file
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy();
-                            self.status_messages
-                                .push(format!("{}: {}", result.message, target_name));
-                        } else {
-                            self.status_messages.push(result.message);
-                        }
+        // Sync
+        match settings::sync_settings(source_file, &target_files, self.dry_run_mode) {
+            Ok(results) => {
+                let mut total_synced = 0;
+                for result in results {
+                    if result.success {
+                        total_synced += 1;
+                        let target_name = result
+                            .target_file
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy();
+                        self.status_messages
+                            .push(format!("{}: {}", result.message, target_name));
+                    } else {
+                        self.status_messages.push(result.message);
                     }
                 }
-                Err(e) => {
-                    self.status_messages.push(format!("Sync error: {}", e));
-                }
+
+                let action = if self.dry_run_mode {
+                    "Would sync"
+                } else {
+                    "Synced"
+                };
+                self.status_messages
+                    .push(format!("{} {} files", action, total_synced));
+            }
+            Err(e) => {
+                self.status_messages.push(format!("Sync error: {}", e));
             }
         }
-
-        let action = if self.dry_run_mode {
-            "Would sync"
-        } else {
-            "Synced"
-        };
-        self.status_messages
-            .push(format!("{} {} files", action, total_synced));
     }
 
     fn load_backups(&mut self) {
@@ -325,28 +391,6 @@ impl PackPreferencesApp {
             }
         }
     }
-
-    fn get_display_name(&self, file: &CharacterFile) -> String {
-        self.character_names
-            .get(&file.character_id)
-            .cloned()
-            .unwrap_or_else(|| format!("Character {}", file.character_id))
-    }
-
-    fn get_unique_characters(&self) -> Vec<(usize, u64, String)> {
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
-
-        for (idx, file) in self.character_files.iter().enumerate() {
-            if file.file_type == FileType::Character && !seen.contains(&file.character_id) {
-                seen.insert(file.character_id);
-                let name = self.get_display_name(file);
-                result.push((idx, file.character_id, name));
-            }
-        }
-
-        result
-    }
 }
 
 impl eframe::App for PackPreferencesApp {
@@ -362,7 +406,7 @@ impl eframe::App for PackPreferencesApp {
                         PendingAction::Sync => {
                             ui.label("Are you sure you want to sync settings?");
                             if !self.dry_run_mode {
-                                ui.label("This will overwrite target character settings.");
+                                ui.label("This will overwrite target settings.");
                                 ui.label("A backup will be created first.");
                             }
                         }
@@ -412,22 +456,69 @@ impl eframe::App for PackPreferencesApp {
 
             ui.separator();
 
+            // Sync mode selection
+            ui.horizontal(|ui| {
+                ui.label("Sync Mode:");
+                let char_count = self
+                    .character_files
+                    .iter()
+                    .filter(|f| f.file_type == FileType::Character)
+                    .count();
+                let user_count = self
+                    .character_files
+                    .iter()
+                    .filter(|f| f.file_type == FileType::User)
+                    .count();
+
+                if ui
+                    .radio_value(
+                        &mut self.sync_mode,
+                        SyncMode::Characters,
+                        format!("Characters ({})", char_count),
+                    )
+                    .changed()
+                {
+                    self.source_selection = None;
+                    self.target_selections.clear();
+                }
+                if ui
+                    .radio_value(
+                        &mut self.sync_mode,
+                        SyncMode::Users,
+                        format!("Accounts/Users ({})", user_count),
+                    )
+                    .changed()
+                {
+                    self.source_selection = None;
+                    self.target_selections.clear();
+                }
+            });
+
+            ui.separator();
+
+            let items = self.get_selectable_items();
+            let type_label = match self.sync_mode {
+                SyncMode::Characters => "Character",
+                SyncMode::Users => "Account",
+            };
+
             // Source selection
-            ui.heading("Source Character (copy FROM):");
-            let unique_chars = self.get_unique_characters();
+            ui.heading(format!("Source {} (copy FROM):", type_label));
             egui::ScrollArea::vertical()
                 .id_salt("source_scroll")
-                .max_height(150.0)
+                .max_height(120.0)
                 .show(ui, |ui| {
-                    for (idx, char_id, name) in &unique_chars {
-                        let selected = self.source_selection == Some(*idx);
+                    if items.is_empty() {
+                        ui.label(format!("No {} files found", type_label.to_lowercase()));
+                    }
+                    for item in &items {
+                        let selected = self.source_selection == Some(item.file_idx);
                         if ui
-                            .radio(selected, format!("{}  [{}]", name, char_id))
+                            .radio(selected, format!("{}  [{}]", item.display_name, item.id))
                             .clicked()
                         {
-                            self.source_selection = Some(*idx);
-                            // Remove from targets if selected as source
-                            self.target_selections.remove(idx);
+                            self.source_selection = Some(item.file_idx);
+                            self.target_selections.remove(&item.file_idx);
                         }
                     }
                 });
@@ -435,7 +526,7 @@ impl eframe::App for PackPreferencesApp {
             ui.separator();
 
             // Target selection
-            ui.heading("Target Characters (copy TO):");
+            ui.heading(format!("Target {}s (copy TO):", type_label));
             ui.horizontal(|ui| {
                 if ui.button("Select All").clicked() {
                     self.select_all_targets();
@@ -449,21 +540,24 @@ impl eframe::App for PackPreferencesApp {
                 .id_salt("target_scroll")
                 .max_height(150.0)
                 .show(ui, |ui| {
-                    for (idx, char_id, name) in &unique_chars {
+                    for item in &items {
                         // Can't select source as target
-                        if self.source_selection == Some(*idx) {
+                        if self.source_selection == Some(item.file_idx) {
                             continue;
                         }
 
-                        let mut selected = self.target_selections.contains(idx);
+                        let mut selected = self.target_selections.contains(&item.file_idx);
                         if ui
-                            .checkbox(&mut selected, format!("{}  [{}]", name, char_id))
+                            .checkbox(
+                                &mut selected,
+                                format!("{}  [{}]", item.display_name, item.id),
+                            )
                             .changed()
                         {
                             if selected {
-                                self.target_selections.insert(*idx);
+                                self.target_selections.insert(item.file_idx);
                             } else {
-                                self.target_selections.remove(idx);
+                                self.target_selections.remove(&item.file_idx);
                             }
                         }
                     }
