@@ -26,7 +26,7 @@ cargo build --release
 ## Usage
 
 1. Launch the application
-2. If EVE is running, it will auto-detect the Wine prefix
+2. If EVE Launcher is running, it will auto-detect the Wine prefix
 3. Otherwise, click "Browse" to select your Wine prefix (`drive_c` directory)
 4. Select a source character to copy settings FROM
 5. Select target characters to copy settings TO
