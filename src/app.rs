@@ -483,11 +483,7 @@ impl PackPreferencesApp {
     }
 
     fn version_newer(latest: &str, current: &str) -> bool {
-        let parse = |v: &str| -> Vec<u32> {
-            v.split('.')
-                .filter_map(|s| s.parse().ok())
-                .collect()
-        };
+        let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
 
         let latest_parts = parse(latest);
         let current_parts = parse(current);
@@ -606,15 +602,14 @@ impl eframe::App for PackPreferencesApp {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        ui.label(format!(
-                            "A new version ({}) is available!",
-                            version
-                        ));
+                        ui.label(format!("A new version ({}) is available!", version));
                         ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
                             if ui.button("Download").clicked() {
-                                let _ = open::that("https://github.com/sopleb/PackPreferences/releases/latest");
+                                let _ = open::that(
+                                    "https://github.com/sopleb/PackPreferences/releases/latest",
+                                );
                                 self.show_update_dialog = false;
                             }
                             if ui.button("Later").clicked() {
@@ -655,7 +650,10 @@ impl eframe::App for PackPreferencesApp {
                     // Show update indicator or check button
                     if self.update_available.is_some() {
                         if ui
-                            .button(egui::RichText::new("Update Available").color(theme::colors::ELECTRIC_GREEN))
+                            .button(
+                                egui::RichText::new("Update Available")
+                                    .color(theme::colors::ELECTRIC_GREEN),
+                            )
                             .clicked()
                         {
                             self.show_update_dialog = true;
